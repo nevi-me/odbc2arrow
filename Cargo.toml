@@ -12,5 +12,7 @@ readme = "README.md"
 
 [dependencies]
 odbc-api = "0.7.0"
+odbc-safe = "*"
 arrow = "2.0.0"
 log = "0.4.11"
+chrono = "0.4"

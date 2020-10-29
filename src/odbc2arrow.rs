@@ -82,6 +82,7 @@ impl<'b, 'o> OdbcArrowReader<'b, 'o> {
                         }
                         ArrowType::Int8 | ArrowType::Int16 | ArrowType::Int32 => {
                             let (values, indicators) = buffer.i32_column(index);
+                            let value_len = values.len();
                             let array_data = values.to_byte_slice();
                             let array_buf = Buffer::from(array_data);
                             // TODO: is it faster if we create a non-null i64, then compare to create bools?
@@ -92,6 +93,7 @@ impl<'b, 'o> OdbcArrowReader<'b, 'o> {
                             let nullity = nullity.to_byte_slice();
                             let array_data = ArrayData::builder(ArrowType::Int32)
                                 .add_buffer(array_buf)
+                                .len(value_len)
                                 .null_bit_buffer(Buffer::from(nullity))
                                 .build();
                             let array = make_array(array_data);
@@ -100,6 +102,7 @@ impl<'b, 'o> OdbcArrowReader<'b, 'o> {
                         }
                         ArrowType::Int64 => {
                             let (values, indicators) = buffer.i64_column(index);
+                            let value_len = values.len();
                             let array_data = values.to_byte_slice();
                             let array_buf = Buffer::from(array_data);
                             // TODO: is it faster if we create a non-null i64, then compare to create bools?
@@ -108,16 +111,16 @@ impl<'b, 'o> OdbcArrowReader<'b, 'o> {
                                 .map(|i| *i != NULL_DATA)
                                 .collect::<Vec<bool>>();
                             let nullity = nullity.to_byte_slice();
-                            let array_data = ArrayData::builder(ArrowType::Int32)
+                            let array_data = ArrayData::builder(ArrowType::Int64)
                                 .add_buffer(array_buf)
+                                .len(value_len)
                                 .null_bit_buffer(Buffer::from(nullity))
                                 .build();
-                            let array = make_array(array_data);
-                            arrow::compute::cast(&array, field.data_type())
-                                .expect("Unable to cast i64")
+                            make_array(array_data)
                         }
                         ArrowType::Float32 => {
                             let (values, indicators) = buffer.f32_column(index);
+                            let value_len = values.len();
                             let array_data = values.to_byte_slice();
                             let array_buf = Buffer::from(array_data);
                             // TODO: is it faster if we create a non-null i64, then compare to create bools?
@@ -128,12 +131,14 @@ impl<'b, 'o> OdbcArrowReader<'b, 'o> {
                             let nullity = nullity.to_byte_slice();
                             let array_data = ArrayData::builder(ArrowType::Float32)
                                 .add_buffer(array_buf)
+                                .len(value_len)
                                 .null_bit_buffer(Buffer::from(nullity))
                                 .build();
                             make_array(array_data)
                         }
                         ArrowType::Float64 => {
                             let (values, indicators) = buffer.f64_column(index);
+                            let value_len = values.len();
                             let array_data = values.to_byte_slice();
                             let array_buf = Buffer::from(array_data);
                             // TODO: is it faster if we create a non-null i64, then compare to create bools?
@@ -144,12 +149,60 @@ impl<'b, 'o> OdbcArrowReader<'b, 'o> {
                             let nullity = nullity.to_byte_slice();
                             let array_data = ArrayData::builder(ArrowType::Float64)
                                 .add_buffer(array_buf)
+                                .len(value_len)
                                 .null_bit_buffer(Buffer::from(nullity))
                                 .build();
                             make_array(array_data)
                         }
-                        ArrowType::Timestamp(_, _) => todo!("Timestamps not yet implemented"),
-                        ArrowType::Date32(_) => todo!("Dates not yet implemented"),
+                        ArrowType::Timestamp(_, _) => {
+                            let buf = buffer.timestamp_it(index);
+                            // Transform dates epoch timestamps
+                            // TODO is it quicker to use chrono, or to hand-roll this?
+                            // TODO creating the buffers directly might also be quicker
+                            let times = buf
+                                .map(|v| {
+                                    v.map(|ts| {
+                                        let ts = chrono::NaiveDate::from_ymd(
+                                            ts.year as i32,
+                                            ts.month as u32,
+                                            ts.day as u32,
+                                        )
+                                        .and_hms_nano(
+                                            ts.hour as u32,
+                                            ts.minute as u32,
+                                            ts.second as u32,
+                                            ts.fraction as u32,
+                                        );
+                                        ts.timestamp_nanos()
+                                    })
+                                })
+                                .collect::<Vec<Option<i64>>>();
+                            let array = Arc::new(Int64Array::from(times)) as ArrayRef;
+                            arrow::compute::cast(&array, field.data_type())
+                                .expect("Unable to cast to timestamp")
+                        }
+                        ArrowType::Date32(_) => {
+                            let buf = buffer.date_it(index);
+                            let unix_epoch = chrono::NaiveDate::from_ymd(1970, 1, 1);
+                            // Transform dates to days since Unix epoch
+                            // TODO is it quicker to use chrono, or to hand-roll this?
+                            // TODO creating the buffers directly might also be quicker
+                            let dates = buf
+                                .map(|v| {
+                                    v.map(|date| {
+                                        let date = chrono::NaiveDate::from_ymd(
+                                            date.year as i32,
+                                            date.month as u32,
+                                            date.day as u32,
+                                        );
+                                        let duration = date.signed_duration_since(unix_epoch);
+                                        duration.num_days().try_into().unwrap()
+                                    })
+                                })
+                                .collect::<Vec<Option<i32>>>();
+                            let array = Date32Array::from(dates);
+                            Arc::new(array) as ArrayRef
+                        }
                         ArrowType::Utf8 => {
                             let buf = buffer.text_column_it(index);
                             let array = StringArray::from(
